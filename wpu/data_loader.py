@@ -1,4 +1,5 @@
 import pandas as pd
+from pathlib import Path
 
 # -------------------------
 # Load daily WPU exchange rates
@@ -34,60 +35,48 @@ def load_daily_exchange_rates(file_path, tz='UTC'):
 # -------------------------
 # Load daily WPU constituent weights
 # -------------------------
-def load_wpu_weights(file_path, tz='UTC'):
+def load_wpu_weights(file_path):
     """
-    Load a CSV of daily WPU constituent weights.
-
-    Args:
-        file_path (str): Path to CSV file, e.g., "/data/wpu_constituents.csv"
-        tz (str): Timezone for datetime column
-
-    Returns:
-        pd.DataFrame: dataframe with datetime and weight columns for each currency
-
-    Example:
-        weights_df = load_wpu_weights("/data/wpu_constituents.csv")
-        print(weights_df.head())
+    Load WPU constituent weights from CSV.
+    The first column is always treated as the date.
     """
+    file_path = Path(file_path)
     df = pd.read_csv(file_path)
-    df['datetime'] = pd.to_datetime(df.iloc[:,0], format='%m/%d/%Y', errors='coerce')
-    df = df.dropna(subset=['datetime']).reset_index(drop=True)
-    if df['datetime'].dt.tz is None:
-        df['datetime'] = df['datetime'].dt.tz_localize(tz)
-    
-    # convert all numeric columns (weights) to floats
-    for c in df.columns[1:]:
-        df[c] = pd.to_numeric(df[c], errors='coerce')
-    
+
+    # Rename first column to 'Date'
+    df = df.rename(columns={df.columns[0]: 'Date'})
+
+    # Parse as datetime
+    df['Date'] = pd.to_datetime(df['Date'])
+
+    # Optional: set Date as index
+    df = df.set_index('Date').sort_index()
+
     return df
 
 
 # -------------------------
 # Minute loader
 # -------------------------
-def read_minute_wpu(file_obj, tz='UTC', default_col='USD='):
-    name = getattr(file_obj, "name", "")
-    if name.endswith('.xlsx') or name.endswith('.xls'):
-        raw = pd.read_excel(file_obj, skiprows=1)
-    else:
-        raw = pd.read_csv(file_obj, skiprows=1)
+def read_minute_wpu(file_path, ts_col="Timestamp"):
+    """
+    Reads a minute-level WPU exchange rate CSV and returns:
+    - raw: wide dataframe with ['datetime', 'AUD', 'BRL', ...]
+    - currencies: list of currency columns
+    """
+    file_path = Path(file_path)
+    raw = pd.read_csv(file_path)
+    raw.columns = [col.rstrip('=') for col in raw.columns]
 
-    raw.columns = [c.strip() for c in raw.columns]
-    ts_col_candidates = [c for c in raw.columns if 'time' in c.lower()]
-    ts_col = ts_col_candidates[0] if ts_col_candidates else raw.columns[0]
+    if ts_col not in raw.columns:
+        raise ValueError(f"Expected timestamp column '{ts_col}' not found. Columns are: {list(raw.columns)}")
 
     raw['datetime'] = pd.to_datetime(raw[ts_col], errors='coerce')
     raw = raw.dropna(subset=['datetime']).reset_index(drop=True)
-    if raw['datetime'].dt.tz is None:
-        raw['datetime'] = raw['datetime'].dt.tz_localize(tz)
 
-    price_cols = [c for c in raw.columns if c != ts_col]
-    for c in price_cols:
-        raw[c] = pd.to_numeric(raw[c], errors='coerce')
-
-    chosen_col = default_col if default_col in price_cols else price_cols[0] if price_cols else None
-    tidy = raw[['datetime', chosen_col]].rename(columns={chosen_col:'price'}).dropna(subset=['price']).reset_index(drop=True) if chosen_col else pd.DataFrame(columns=['datetime','price'])
-    return raw, tidy, price_cols
+    currencies = [col for col in raw.columns if col not in [ts_col, 'datetime']]
+    
+    return raw, currencies
 
 # -------------------------
 # Tick loader

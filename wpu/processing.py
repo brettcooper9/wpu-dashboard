@@ -78,51 +78,53 @@ def filter_by_zoom(df, zoom='1d', price_col='price'):
 
 
 
-
-def calculate_wpu_price(exchange_df, weights_df, currencies=None, tz='NYC'):
+def calculate_wpu_price(rate_df, weights_df, date_col="datetime"):
     """
-    Compute WPU price for any frequency of exchange rates using daily weights.
-    
-    Args:
-        exchange_df (pd.DataFrame): exchange rates with a 'datetime' column and currency columns.
-                                    Can be minute, tick, or daily frequency.
-        weights_df (pd.DataFrame): daily weights with 'datetime' column and same currency columns.
-        currencies (list, optional): list of currencies to include. Default: all columns in weights_df except 'datetime'.
-        tz (str): timezone to localize weights and exchange_df if naive.
-    
-    Returns:
-        pd.DataFrame: dataframe with 'datetime' and calculated 'price'
-    
-    Notes:
-        - Daily weights are forward-filled to match the timestamp of exchange_df.
-        - Exchange rates are multiplied by weights/100 (assuming weights sum to 100%).
-    
-    Example:
-        # Calculate WPUUSD for minute-level exchange rates using daily weights
-        wpu_minute = calculate_wpu_price(minute_df, weights_df)
+    Calculate WPUUSD from wide-format exchange rate data and daily weights.
+
+    Missing rates or weights are forward-filled.
+
+    Parameters
+    ----------
+    rate_df : pd.DataFrame
+        Wide-format exchange rate data. Columns: ['datetime', 'AUD', 'BRL', ..., 'USD']
+    weights_df : pd.DataFrame
+        Daily WPU weights. Columns: ['AUD', 'BRL', ..., 'USD'], indexed by date.
+    date_col : str
+        Column in rate_df containing timestamps.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with ['datetime', 'WPUUSD']
     """
-    if currencies is None:
-        currencies = [c for c in weights_df.columns if c != 'datetime']
+    df = rate_df.copy()
+    df[date_col] = pd.to_datetime(df[date_col])
+    df = df.sort_values(date_col).reset_index(drop=True)
 
-    # Ensure datetime columns are timezone-aware
-    if exchange_df['datetime'].dt.tz is None:
-        exchange_df['datetime'] = exchange_df['datetime'].dt.tz_localize(tz)
-    if weights_df['datetime'].dt.tz is None:
-        weights_df['datetime'] = weights_df['datetime'].dt.tz_localize(tz)
+    # Forward-fill missing rates per currency
+    currency_cols = [c for c in df.columns if c != date_col]
+    df[currency_cols] = df[currency_cols].ffill()
 
-    # Forward-fill weights to match timestamps in exchange_df
-    weights_ff = weights_df.set_index('datetime').sort_index()
-    # Reindex weights to match exchange_df's datetime index (nearest previous weight)
-    weights_ff = weights_ff.reindex(exchange_df['datetime'], method='ffill').reset_index()
-    
-    # Compute weighted sum
-    price_series = pd.Series(0, index=exchange_df.index, dtype=float)
-    for c in currencies:
-        if c in exchange_df.columns and c in weights_ff.columns:
-            price_series += exchange_df[c] * weights_ff[c] / 100
-    
-    result = pd.DataFrame({
-        'datetime': exchange_df['datetime'],
-        'price': price_series
-    })
-    return result
+    # Prepare weights: ensure index is datetime and forward-fill missing weights
+    weights = weights_df.copy()
+    if not pd.api.types.is_datetime64_any_dtype(weights.index):
+        weights.index = pd.to_datetime(weights.index)
+    weights = weights.sort_index().ffill()
+
+    # Align each timestamp with the appropriate daily weights
+    df['weight_date'] = df[date_col].dt.floor('D')  # truncate to date
+    merged = df.merge(weights, left_on='weight_date', right_index=True,
+                      how='left', suffixes=('', '_wt'))
+
+    # Construct weight column names
+    wt_cols = [c + '_wt' for c in currency_cols]
+
+    # Forward-fill missing weights (in case of missing merge)
+    merged[wt_cols] = merged[wt_cols].ffill()
+
+    # Compute WPUUSD = sum(rate * weight)
+    merged['WPUUSD'] = merged[currency_cols].mul(merged[wt_cols], axis=0).sum(axis=1)
+
+    # Return only datetime and WPUUSD
+    return merged[[date_col, 'WPUUSD']].copy()
